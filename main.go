@@ -1,82 +1,48 @@
 package main
 
 import (
+	"assignment2/config/postgres"
+	"assignment2/http/routes"
+	orders "assignment2/repository/postgres"
+
 	"fmt"
-	"net/http"
-	"time"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/gin-gonic/gin"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
+	"github.com/subosito/gotenv"
 )
 
-type Item struct {
-	ItemID      int
-	ItemCode    int
-	Description string
-	Quantity    int
-	OrderId     int
+func init() {
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
+
+	if err := gotenv.Load(); err != nil {
+		log.Println(err)
+	}
 }
-
-type Order struct {
-	OrderID      int
-	CustomerName string `gorm:"type:varchar(100)"`
-	OrderedAt    time.Time
-
-	Items Item
-}
-
-type Response struct {
-	Code    string      `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data"`
-}
-
-var (
-	db    *gorm.DB
-	errDb error
-)
 
 func main() {
-	dsn := "host=localhost user=postgres password=postgres dbname=orders_by port=5432 sslmode=disable"
-	db, errDb = gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if errDb != nil {
-		fmt.Println("Error: ", errDb)
-	}
-	db.Debug().AutoMigrate(Order{}, Item{})
+	db := postgres.Connect()
+	repo := orders.NewOrderRepo(db)
 
-	r := gin.Default()
-	p := r.Group("/orders")
-	{
-		p.GET("/", Get)
-		p.POST("/", Create)
-		p.PUT("/", Update)
-		p.DELETE("/:id", Delete)
-	}
-	r.Run()
-}
+	errs := make(chan error)
 
-func Get(c *gin.Context) {
-	var orders []Order
-	result := db.Find(&orders)
-	c.JSON(http.StatusOK, gin.H{"data": result})
-}
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
-func Create(c *gin.Context) {
-	var order Order
-	c.BindJSON(&order)
+		sig := <-sigChan
+		log.Printf("Signal notified %v", sig)
+		errs <- fmt.Errorf("%v", sig)
+	}()
 
-	result := db.Create(&order)
-	c.JSON(http.StatusOK, gin.H{"data": result})
-}
+	go func() {
+		router := routes.NewRouter(repo)
+		if err := router.Run(":" + os.Getenv("PORT")); err != nil {
+			errs <- err
+		}
+	}()
 
-func Update(c *gin.Context) {
-	// var order Order
-
-}
-
-func Delete(c *gin.Context) {
-	var order Order
-	db.Delete(&order)
-	c.JSON(http.StatusOK, gin.H{"message": "Order deleted successfully."})
+	log.Fatal(<-errs)
 }
